@@ -2,7 +2,7 @@
 #include <torch/extension.h>
 #include <cnrt.h>
 
-#define CHUNK_SIZE 4096
+#define CHUNK_SIZE 6144
 
 __mlu_entry__ void leakyrelu_kernel(
     float *input,
@@ -24,8 +24,7 @@ __mlu_entry__ void leakyrelu_kernel(
 
     // NRAM
     __nram__ float nram_input[CHUNK_SIZE];
-    __nram__ float nram_relu[CHUNK_SIZE];
-    __nram__ float nram_temp[CHUNK_SIZE];
+    __nram__ float nram_output[CHUNK_SIZE];
 
     for (uint32_t offset = 0; offset < count; offset += CHUNK_SIZE) {
 
@@ -44,34 +43,34 @@ __mlu_entry__ void leakyrelu_kernel(
 
         // relu(x)
         __bang_active_relu(
-            nram_relu,
+            nram_output,
             nram_input,
             aligned_len);
 
-        // min(0,x)
+        // x - relu(x) = min(0, x)
         __bang_sub(
-            nram_temp,
             nram_input,
-            nram_relu,
+            nram_input,
+            nram_output,
             aligned_len);
 
         // negative_slope * min(0,x)
         __bang_mul_scalar(
-            nram_temp,
-            nram_temp,
+            nram_input,
+            nram_input,
             negative_slope,
             aligned_len);
 
-        // relu + scaled negative
+        // relu(x) + negative_slope * min(0,x)
         __bang_add(
-            nram_temp,
-            nram_relu,
-            nram_temp,
+            nram_output,
+            nram_output,
+            nram_input,
             aligned_len);
 
         __memcpy(
             output + start + offset,
-            nram_temp,
+            nram_output,
             len * sizeof(float),
             NRAM2GDRAM);
     }
