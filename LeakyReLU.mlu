@@ -1,52 +1,38 @@
-#include "bang.h"
-#include "cnrt.h"
-#include <torch/torch.h>
+import torch
+import torch.nn as nn
 
-#define NRAM_MAX_SIZE 1024 * 128
-#define ELEM_COUNT (NRAM_MAX_SIZE / sizeof(float))
+class Model(nn.Module):
+    """
+    Simple model that performs a LeakyReLU activation.
+    """
+    def __init__(self, negative_slope: float = 0.01):
+        """
+        Initializes the LeakyReLU module.
 
-__mlu_global__ void leaky_relu_kernel(float* input, float* output, int num_elements, float negative_slope) {
-    __nram__ float nram_input[ELEM_COUNT];
-    __nram__ float nram_temp[ELEM_COUNT];
+        Args:
+            negative_slope (float, optional): The negative slope of the activation function. Defaults to 0.01.
+        """
+        super(Model, self).__init__()
+        self.negative_slope = negative_slope
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Applies LeakyReLU activation to the input tensor.
 
-    int task_size = num_elements / taskDim;
-    int remainder = num_elements % taskDim;
-    int start = taskId * task_size + (taskId < remainder ? taskId : remainder);
-    int len = task_size + (taskId < remainder ? 1 : 0);
+        Args:
+            x (torch.Tensor): Input tensor of any shape.
 
-    for (int offset = 0; offset < len; offset += ELEM_COUNT) {
-        int cur_len = (offset + ELEM_COUNT <= len) ? ELEM_COUNT : (len - offset);
-        int align_len = (cur_len + 63) / 64 * 64;
+        Returns:
+            torch.Tensor: Output tensor with LeakyReLU applied, same shape as input.
+        """
+        return torch.nn.functional.leaky_relu(x, negative_slope=self.negative_slope)
 
-        __memcpy(nram_input, input + start + offset, cur_len * sizeof(float), GDRAM2NRAM);
+batch_size = 16
+dim = 16384
 
-        // nram_temp = nram_input * negative_slope
-        __bang_mul_const(nram_temp, nram_input, negative_slope, align_len);
-        // output = (input >= 0) ? input : input * negative_slope
-        __bang_maxequal(nram_temp, nram_temp, nram_input, align_len);
+def get_inputs():
+    x = torch.randn(batch_size, dim)
+    return [x]
 
-        __memcpy(output + start + offset, nram_temp, cur_len * sizeof(float), NRAM2GDRAM);
-    }
-}
-
-torch::Tensor bang_func(torch::Tensor input, float negative_slope) {
-    auto output = torch::empty_like(input);
-    int num_elements = input.numel();
-
-    cnrtQueue_t queue;
-    cnrtQueueCreate(&queue);
-
-    cnrtDim3_t dim;
-    dim.x = 4;
-    dim.y = 1;
-    dim.z = 1;
-    cnrtFunctionType_t func_type = CNRT_FUNC_TYPE_BLOCK;
-
-    leaky_relu_kernel<<<dim, func_type, queue>>>(
-        input.data_ptr<float>(), output.data_ptr<float>(), num_elements, negative_slope);
-
-    cnrtQueueSync(queue);
-    cnrtQueueDestroy(queue);
-
-    return output;
-}
+def get_init_inputs():
+    return [0.01]  # No special initialization inputs needed
