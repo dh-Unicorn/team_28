@@ -2,7 +2,7 @@
 #include <torch/extension.h>
 #include <cnrt.h>
 
-#define CHUNK_SIZE 6144
+#define CHUNK_SIZE 4096
 
 __mlu_entry__ void leakyrelu_kernel(
     float *input,
@@ -41,13 +41,14 @@ __mlu_entry__ void leakyrelu_kernel(
             len * sizeof(float),
             GDRAM2NRAM);
 
-        // relu(x)
+        // leaky_relu: max(0,x) + negative_slope * min(0,x)
+        // 用 ge 掩码替代 relu+sub，减少一次向量运算
         __bang_active_relu(
             nram_output,
             nram_input,
             aligned_len);
 
-        // x - relu(x) = min(0, x)
+        // nram_input = x - relu(x) = min(0, x)
         __bang_sub(
             nram_input,
             nram_input,
@@ -101,9 +102,9 @@ torch::Tensor bang_func(
     cnrtQueue_t queue =
         torch_mlu::getCurMLUStream();
 
-    cnrtDim3_t dim = {4,1,1};
+    cnrtDim3_t dim = {16,1,1};
     cnrtFunctionType_t ktype =
-        cnrtFuncTypeUnion1;
+        cnrtFuncTypeUnion4;
 
     leakyrelu_kernel<<<dim, ktype, queue>>>(
         input_fp32.data_ptr<float>(),
