@@ -2,7 +2,7 @@
 #include <torch/extension.h>
 #include <cnrt.h>
 
-#define CHUNK_SIZE 4096
+#define CHUNK_SIZE 16384
 
 __mlu_entry__ void leakyrelu_kernel(
     float *input,
@@ -10,70 +10,58 @@ __mlu_entry__ void leakyrelu_kernel(
     int total,
     float negative_slope) {
 
-    // 多核拆分参数
     uint32_t core_id = taskId;
     uint32_t core_num = taskDim;
     uint32_t per_core = total / core_num;
-    uint32_t remainder = total % core_num; // 修正笔误
+    uint32_t remainder = total % core_num;
 
     uint32_t start = core_id * per_core +
                      (core_id < remainder ? core_id : remainder);
-
     uint32_t count = per_core +
                      (core_id < remainder ? 1 : 0);
 
-    // NRAM
-    __nram__ float nram_input[CHUNK_SIZE];
-    __nram__ float nram_relu[CHUNK_SIZE];
-    __nram__ float nram_temp[CHUNK_SIZE];
+    // 双缓冲流水线: ping-pong buffers
+    __nram__ float nram_buf[CHUNK_SIZE * 2];
+    __nram__ float nram_tmp[CHUNK_SIZE];
 
-    for (uint32_t offset = 0; offset < count; offset += CHUNK_SIZE) {
+    float *ping = nram_buf;
+    float *pong = nram_buf + CHUNK_SIZE;
 
-        uint32_t len =
-            (offset + CHUNK_SIZE <= count)
-                ? CHUNK_SIZE
-                : (count - offset);
+    uint32_t num_chunks = (count + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-        uint32_t aligned_len = (len + 63) & ~63;
+    if (num_chunks == 0) return;
 
-        __memcpy(
-            nram_input,
-            input + start + offset,
-            len * sizeof(float),
-            GDRAM2NRAM);
+    // Load first chunk
+    uint32_t len0 = (count < CHUNK_SIZE) ? count : CHUNK_SIZE;
+    __memcpy(ping, input + start, len0 * sizeof(float), GDRAM2NRAM);
 
-        // relu(x)
-        __bang_active_relu(
-            nram_relu,
-            nram_input,
-            aligned_len);
+    for (uint32_t i = 0; i < num_chunks; i++) {
+        uint32_t cur_offset = i * CHUNK_SIZE;
+        uint32_t cur_len = ((cur_offset + CHUNK_SIZE) <= count)
+            ? CHUNK_SIZE : (count - cur_offset);
+        uint32_t cur_aligned = (cur_len + 63) & ~63;
 
-        // min(0,x)
-        __bang_sub(
-            nram_temp,
-            nram_input,
-            nram_relu,
-            aligned_len);
+        float *cur_buf = (i % 2 == 0) ? ping : pong;
+        float *nxt_buf = (i % 2 == 0) ? pong : ping;
 
-        // negative_slope * min(0,x)
-        __bang_mul_scalar(
-            nram_temp,
-            nram_temp,
-            negative_slope,
-            aligned_len);
+        // Prefetch next chunk (overlap with compute)
+        if (i + 1 < num_chunks) {
+            uint32_t nxt_offset = (i + 1) * CHUNK_SIZE;
+            uint32_t nxt_len = ((nxt_offset + CHUNK_SIZE) <= count)
+                ? CHUNK_SIZE : (count - nxt_offset);
+            __memcpy_async(nxt_buf, input + start + nxt_offset,
+                           nxt_len * sizeof(float), GDRAM2NRAM);
+        }
 
-        // relu + scaled negative
-        __bang_add(
-            nram_temp,
-            nram_relu,
-            nram_temp,
-            aligned_len);
+        // Compute LeakyReLU: relu(x) + negative_slope * min(0,x)
+        __bang_active_relu(nram_tmp, cur_buf, cur_aligned);
+        __bang_sub(cur_buf, cur_buf, nram_tmp, cur_aligned);
+        __bang_mul_scalar(cur_buf, cur_buf, negative_slope, cur_aligned);
+        __bang_add(cur_buf, nram_tmp, cur_buf, cur_aligned);
 
-        __memcpy(
-            output + start + offset,
-            nram_temp,
-            len * sizeof(float),
-            NRAM2GDRAM);
+        // Store result
+        __memcpy(output + start + cur_offset, cur_buf,
+                 cur_len * sizeof(float), NRAM2GDRAM);
     }
 }
 
@@ -102,9 +90,9 @@ torch::Tensor bang_func(
     cnrtQueue_t queue =
         torch_mlu::getCurMLUStream();
 
-    cnrtDim3_t dim = {4,1,1};
+    cnrtDim3_t dim = {16,1,1};
     cnrtFunctionType_t ktype =
-        cnrtFuncTypeUnion1;
+        cnrtFuncTypeUnion4;
 
     leakyrelu_kernel<<<dim, ktype, queue>>>(
         input_fp32.data_ptr<float>(),
