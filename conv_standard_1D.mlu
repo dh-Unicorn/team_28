@@ -1,5 +1,6 @@
 #include <bang.h>
 #include <torch/extension.h>
+#include <framework/core/MLUStream.h>
 #include <cnrt.h>
 
 __mlu_entry__ void conv1d_kernel(float *x, float *weight, float *out, int in_channels, int out_channels, int length, int kernel_size, int stride, int padding, int dilation, int groups, int out_length, int total) {

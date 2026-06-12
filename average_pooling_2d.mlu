@@ -1,5 +1,6 @@
 #include <bang.h>
 #include <torch/extension.h>
+#include <framework/core/MLUStream.h>
 #include <cnrt.h>
 
 __mlu_entry__ void avg_pool2d_kernel(float *x, float *out, int channels, int height, int width, int kernel, int out_h, int out_w, int total) {

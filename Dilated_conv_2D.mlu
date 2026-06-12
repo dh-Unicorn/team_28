@@ -1,5 +1,6 @@
 #include <bang.h>
 #include <torch/extension.h>
+#include <framework/core/MLUStream.h>
 #include <cnrt.h>
 
 __mlu_entry__ void dilated_conv2d_kernel(float *x, float *weight, float *out, int in_channels, int out_channels, int h, int w, int kernel_size, int dilation, int padding, int out_h, int out_w, int total) {

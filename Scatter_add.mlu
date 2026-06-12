@@ -1,23 +1,23 @@
 #include <bang.h>
 #include <torch/extension.h>
+#include <framework/core/MLUStream.h>
 #include <cnrt.h>
 
 #define NRAM_SIZE 4096
 
 __mlu_entry__ void scatter_add_kernel(float *src, long *index, float *out, int rows, int cols) {
     __nram__ float buf[NRAM_SIZE];
-    for (int row = taskId; row < rows; row += taskDim) {
+    __nram__ float buf_s[NRAM_SIZE];
+    if (taskId != 0) return;
+    for (int row = 0; row < rows; ++row) {
         int dst_row = (int)index[row];
         float *s = src + row * cols;
         float *d = out + dst_row * cols;
         for (int done = 0; done < cols; done += NRAM_SIZE) {
             int len = (cols - done) < NRAM_SIZE ? (cols - done) : NRAM_SIZE;
-            // read-modify-write: no race because one core per row
             __memcpy(buf, d + done, len * sizeof(float), GDRAM2NRAM);
-            __nram__ float buf_s[NRAM_SIZE];
             __memcpy(buf_s, s + done, len * sizeof(float), GDRAM2NRAM);
-            int aligned_len = (len + 63) & ~63;
-            __bang_add(buf, buf, buf_s, aligned_len);
+            for (int i = 0; i < len; ++i) buf[i] += buf_s[i];
             __memcpy(d + done, buf, len * sizeof(float), NRAM2GDRAM);
         }
     }

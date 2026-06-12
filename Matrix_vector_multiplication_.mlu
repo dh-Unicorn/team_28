@@ -1,5 +1,6 @@
 #include <bang.h>
 #include <torch/extension.h>
+#include <framework/core/MLUStream.h>
 #include <cnrt.h>
 
 #define NRAM_SIZE 4096
@@ -12,11 +13,9 @@ __mlu_entry__ void gemv_kernel(float *a, float *b, float *out, int rows, int inn
         float sum = 0.0f;
         for (int done = 0; done < inner; done += NRAM_SIZE) {
             int len = (inner - done) < NRAM_SIZE ? (inner - done) : NRAM_SIZE;
-            int aligned_len = (len + 63) & ~63;
             __memcpy(buf_a, src + done, len * sizeof(float), GDRAM2NRAM);
             __memcpy(buf_b, b + done, len * sizeof(float), GDRAM2NRAM);
-            __bang_mul(buf_a, buf_a, buf_b, aligned_len);
-            for (int i = 0; i < len; ++i) sum += buf_a[i];
+            for (int i = 0; i < len; ++i) sum += buf_a[i] * buf_b[i];
         }
         out[row] = sum;
     }

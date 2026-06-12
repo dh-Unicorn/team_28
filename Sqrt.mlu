@@ -1,5 +1,6 @@
 #include <bang.h>
 #include <torch/extension.h>
+#include <framework/core/MLUStream.h>
 #include <cnrt.h>
 #include <math.h>
 
@@ -15,10 +16,8 @@ __mlu_entry__ void sqrt_abs_kernel(float *input, float *output, int total) {
     __nram__ float tmp[NRAM_SIZE];
     for (int done = 0; done < count; done += NRAM_SIZE) {
         int len = (count - done) < NRAM_SIZE ? (count - done) : NRAM_SIZE;
-        int aligned_len = (len + 63) & ~63;
         __memcpy(buf, input + start + done, len * sizeof(float), GDRAM2NRAM);
-        __bang_active_abs(buf, buf, aligned_len);
-        __bang_active_sqrt(tmp, buf, aligned_len);
+        for (int i = 0; i < len; ++i) tmp[i] = sqrtf(fabsf(buf[i]));
         __memcpy(output + start + done, tmp, len * sizeof(float), NRAM2GDRAM);
     }
 }

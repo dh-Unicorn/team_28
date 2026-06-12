@@ -1,52 +1,52 @@
 #include <bang.h>
 #include <torch/extension.h>
+#include <framework/core/MLUStream.h>
 #include <cnrt.h>
+#include <vector>
 
 #define NRAM_SIZE 4096
 
-__mlu_entry__ void argmax_dim1_kernel(float *x, long *out, int rows, int cols) {
+__mlu_entry__ void argmax_generic_kernel(float *x, long *out, int outer, int reduce, int inner, int total_out) {
     __nram__ float buf[NRAM_SIZE];
-    for (int row = taskId; row < rows; row += taskDim) {
-        float *src = x + row * cols;
+    for (int out_idx = taskId; out_idx < total_out; out_idx += taskDim) {
+        int inner_idx = out_idx % inner;
+        int outer_idx = out_idx / inner;
+        int base = (outer_idx * reduce * inner) + inner_idx;
         int best = 0;
         float best_val = -3.402823466e+38F;
-        for (int done = 0; done < cols; done += NRAM_SIZE) {
-            int len = (cols - done) < NRAM_SIZE ? (cols - done) : NRAM_SIZE;
-            __memcpy(buf, src + done, len * sizeof(float), GDRAM2NRAM);
+        for (int done = 0; done < reduce; done += NRAM_SIZE) {
+            int len = (reduce - done) < NRAM_SIZE ? (reduce - done) : NRAM_SIZE;
+            for (int i = 0; i < len; ++i) buf[i] = x[base + (done + i) * inner];
             for (int i = 0; i < len; ++i) {
-                if (buf[i] > best_val) { best_val = buf[i]; best = done + i; }
+                float v = buf[i];
+                if (v > best_val) {
+                    best_val = v;
+                    best = done + i;
+                }
             }
         }
-        out[row] = (long)best;
-    }
-}
-
-__mlu_entry__ void argmax_dim0_kernel(float *x, long *out, int rows, int cols) {
-    for (int col = taskId; col < cols; col += taskDim) {
-        int best = 0;
-        float best_val = -3.402823466e+38F;
-        for (int r = 0; r < rows; ++r) {
-            float v = x[r * cols + col];
-            if (v > best_val) { best_val = v; best = r; }
-        }
-        out[col] = (long)best;
+        out[out_idx] = (long)best;
     }
 }
 
 torch::Tensor bang_func(torch::Tensor x, int dim) {
     auto input = x.contiguous().to(torch::kFloat).contiguous();
-    int rows = input.size(0), cols = input.size(1);
+    int nd = input.dim();
+    if (dim < 0) dim += nd;
+    std::vector<int64_t> out_shape;
+    int outer = 1, inner = 1;
+    int reduce = input.size(dim);
+    for (int i = 0; i < nd; ++i) {
+        if (i < dim) outer *= input.size(i);
+        else if (i > dim) inner *= input.size(i);
+        if (i != dim) out_shape.push_back(input.size(i));
+    }
+    auto out = torch::empty(out_shape, x.options().dtype(torch::kLong));
+    int total_out = outer * inner;
     cnrtQueue_t queue = torch_mlu::getCurMLUStream();
     cnrtDim3_t d = {32, 1, 1};
     cnrtFunctionType_t ktype = cnrtFuncTypeUnion8;
-    if (dim == 1 || dim == -1) {
-        auto out = torch::empty({rows}, x.options().dtype(torch::kLong));
-        argmax_dim1_kernel<<<d, ktype, queue>>>(input.data_ptr<float>(), out.data_ptr<long>(), rows, cols);
-        cnrtQueueSync(queue);
-        return out;
-    }
-    auto out = torch::empty({cols}, x.options().dtype(torch::kLong));
-    argmax_dim0_kernel<<<d, ktype, queue>>>(input.data_ptr<float>(), out.data_ptr<long>(), rows, cols);
+    argmax_generic_kernel<<<d, ktype, queue>>>(input.data_ptr<float>(), out.data_ptr<long>(), outer, reduce, inner, total_out);
     cnrtQueueSync(queue);
     return out;
 }

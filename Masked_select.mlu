@@ -1,5 +1,6 @@
 #include <bang.h>
 #include <torch/extension.h>
+#include <framework/core/MLUStream.h>
 #include <cnrt.h>
 
 #define NRAM_SIZE 8192
@@ -46,13 +47,15 @@ torch::Tensor bang_func(torch::Tensor input, double threshold) {
     auto counts = torch::empty({32}, input.options().dtype(torch::kInt));
     auto offsets = torch::empty({32}, input.options().dtype(torch::kInt));
     auto total_out = torch::empty({1}, input.options().dtype(torch::kInt));
-    auto out = torch::empty({total}, x.options());
     cnrtQueue_t queue = torch_mlu::getCurMLUStream();
     cnrtDim3_t dim = {32, 1, 1};
     cnrtDim3_t one = {1, 1, 1};
     cnrtFunctionType_t ktype = cnrtFuncTypeUnion8;
     count_kernel<<<dim, ktype, queue>>>(x.data_ptr<float>(), counts.data_ptr<int>(), total, (float)threshold);
     prefix_kernel<<<one, cnrtFuncTypeBlock, queue>>>(counts.data_ptr<int>(), offsets.data_ptr<int>(), total_out.data_ptr<int>(), 32);
+    cnrtQueueSync(queue);
+    int out_size = total_out.cpu().item<int>();
+    auto out = torch::empty({out_size}, x.options());
     select_kernel<<<dim, ktype, queue>>>(x.data_ptr<float>(), out.data_ptr<float>(), offsets.data_ptr<int>(), total, (float)threshold);
     cnrtQueueSync(queue);
     return out.to(input.dtype());
